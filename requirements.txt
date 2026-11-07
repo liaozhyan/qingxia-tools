@@ -1,0 +1,7 @@
+Pillow
+imageio-ffmpeg
+numpy
+opencv-python
+openpyxl
+python-docx
+pywin32
