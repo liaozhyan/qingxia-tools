@@ -31,24 +31,25 @@ PALETTE = {
 }
 
 ACCENTS = {
+    # 首页入口统一用「主色 / 石板灰 / 文件青」三档，避免像彩色应用商店
     'ppt': '#2563eb',
-    'welcome': '#0d9488',
-    'print': '#ea580c',
-    'countdown': '#e11d48',
-    'music': '#7c3aed',
-    'inbox': '#059669',
-    'wechat': '#07c160',
-    'video': '#b45309',
-    'lottery': '#65a30d',
-    'strip': '#0891b2',
+    'welcome': '#2563eb',
+    'print': '#475569',
+    'countdown': '#2563eb',
+    'music': '#2563eb',
+    'inbox': '#0f766e',
+    'wechat': '#0f766e',
+    'video': '#2563eb',
+    'lottery': '#2563eb',
+    'strip': '#2563eb',
     'tools': '#475569',
-    'qrcode': '#db2777',
-    'downloader': '#ca8a04',
-    'screenshot': '#0d9488',
-    'prompter': '#0ea5e9',
-    'lan': '#0891b2',
-    'photo': '#16a34a',
-    'mail': '#dc2626',
+    'qrcode': '#475569',
+    'downloader': '#64748b',
+    'screenshot': '#475569',
+    'prompter': '#2563eb',
+    'lan': '#0f766e',
+    'photo': '#475569',
+    'mail': '#64748b',
 }
 
 _FONT_FAMILY = None
@@ -861,6 +862,11 @@ class ModernCard(tk.Canvas):
     TILE_PAD = 16
     TILE_BADGE = 42
     TILE_LINE_H = 16
+    HERO_PAD = 16
+    HERO_BADGE = 46
+    HERO_TEXT_X = 76
+    HERO_TITLE_GAP = 6
+    HERO_LINE_H = 15
 
     @classmethod
     def _line_height(cls, size, bold=False):
@@ -885,6 +891,14 @@ class ModernCard(tk.Canvas):
                 + max(1, desc_lines) * cls._line_height(9)
                 + cls.ROW_PAD_BOTTOM)
 
+    @classmethod
+    def hero_height(cls, desc_lines):
+        """现场高频大卡片高度：留白 + 标题 + 间距 + 两行说明。"""
+        return (cls.HERO_PAD * 2
+                + cls._line_height(14, bold=True)
+                + cls.HERO_TITLE_GAP
+                + max(1, desc_lines) * cls.HERO_LINE_H)
+
     def __init__(self, master, title, description, command=None,
                  icon='', accent=PALETTE['primary'], width=440,
                  layout='row'):
@@ -893,6 +907,8 @@ class ModernCard(tk.Canvas):
         if layout == 'tile':
             height = (self.TILE_PAD + self.TILE_BADGE + 12 + 22
                       + max(1, len(self._desc)) * self.TILE_LINE_H + 14)
+        elif layout == 'hero':
+            height = self.hero_height(len(self._desc))
         else:
             height = self.row_height(len(self._desc))
         tk.Canvas.__init__(self, master, height=height, width=width,
@@ -951,6 +967,8 @@ class ModernCard(tk.Canvas):
                        outline=outline, width=1)
             if self._layout == 'tile':
                 self._draw_tile(w, h, p)
+            elif self._layout == 'hero':
+                self._draw_hero(w, h, p)
             else:
                 self._draw_row(w, h, p)
         except tk.TclError:
@@ -978,6 +996,32 @@ class ModernCard(tk.Canvas):
         self.create_text(w - 20, h / 2.0 - 2, text='›', anchor='center',
                          font=font(17, 'bold'),
                          fill=self._accent if self._hover else '#c6cfe0')
+
+    def _draw_hero(self, w, h, p):
+        """现场高频大卡片：左侧主色图标 + 稍大标题 + 两行价值说明。"""
+        pad = self.HERO_PAD
+        size = self.HERO_BADGE
+        by = (h - size) // 2
+        round_rect(self, pad, by, pad + size, by + size, 14,
+                   fill=self._accent, outline='')
+        self.create_text(pad + size / 2.0, by + size / 2.0 + 1,
+                         text=self._icon, font=font(17, 'bold'),
+                         fill='#ffffff')
+        self.create_text(w - 16, h / 2.0 - 2, text='›', anchor='center',
+                         font=font(18, 'bold'),
+                         fill=self._accent if self._hover else '#c6cfe0')
+        title_ls = self._line_height(14, bold=True)
+        desc_ls = self._line_height(9)
+        lines = max(1, len(self._desc))
+        top = max(pad, (h - (title_ls + self.HERO_TITLE_GAP
+                             + lines * desc_ls)) // 2)
+        self.create_text(self.HERO_TEXT_X, top, text=self._title,
+                         anchor='nw', font=font(14, 'bold'), fill=p['text'])
+        y = top + title_ls + self.HERO_TITLE_GAP
+        for line in self._desc:
+            self.create_text(self.HERO_TEXT_X, y, text=line, anchor='nw',
+                             font=font(9), fill=p['muted'])
+            y += desc_ls
 
     def _draw_tile(self, w, h, p):
         """磁贴式：上方色块图标，下面标题 + 说明，右上角箭头。"""

@@ -96,11 +96,13 @@ DRAW_DIR = DATA_DIR / 'draws'
 MUSIC_DIR = DATA_DIR / 'music'
 STATE_FILE = DATA_DIR / 'state.json'
 
-for _d in (DATA_DIR, DRAW_DIR, MUSIC_DIR):
-    try:
-        _d.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+def _ensure_dirs():
+    """用到抽签数据时才建目录，避免只打开其它工具也凭空多出 data/。"""
+    for _d in (DATA_DIR, DRAW_DIR, MUSIC_DIR):
+        try:
+            _d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
 
 DEFAULT_STATE = {
     'settings': {'title': '企业宣讲比赛', 'subtitle': '出场顺序抽签',
@@ -117,6 +119,7 @@ DEFAULT_STATE = {
 # 状态持久化
 # ---------------------------------------------------------------------------
 def load_state():
+    _ensure_dirs()
     state = json.loads(json.dumps(DEFAULT_STATE))
     if STATE_FILE.exists():
         try:
@@ -135,6 +138,7 @@ def load_state():
 
 
 def save_state(state):
+    _ensure_dirs()
     try:
         STATE_FILE.write_text(
             json.dumps(state, ensure_ascii=False, indent=2),
@@ -303,6 +307,7 @@ def build_record(state, seed, items):
 
 
 def save_record(record):
+    _ensure_dirs()
     path = DRAW_DIR / ('%s.json' % record['id'])
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2),
                     encoding='utf-8')

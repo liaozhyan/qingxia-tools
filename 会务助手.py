@@ -368,28 +368,31 @@ class App:
                 pass
 
     def _fit_card_window(self):
-        """卡片总高（随 DPI 变化）超出可视区时，把窗口加高到一屏全显；
-        屏幕实在不够高时维持原高，由现有滚动条兜底，绝不裁切文字。"""
+        """按卡片实际高度收放窗口：内容少时去掉底部空白，内容多时加高；
+        屏幕实在不够高时就保留滚动条，绝不裁切文字。"""
         inner = getattr(self, '_card_inner', None)
         canvas = getattr(self, '_card_canvas', None)
         if inner is None or canvas is None:
             return
         try:
             self.root.update_idletasks()
-            overflow = inner.winfo_reqheight() - canvas.winfo_height()
-            if overflow <= 0:
+            content_h = inner.winfo_reqheight()
+            canvas_h = canvas.winfo_height()
+            if content_h <= 1 or canvas_h <= 1:
                 return
             w = self.root.winfo_width()
             h = self.root.winfo_height()
             screen_w = self.root.winfo_screenwidth()
             screen_h = self.root.winfo_screenheight()
-            # 给任务栏/边缘留出余量
-            new_h = min(h + overflow + 8, screen_h - 48)
-            if new_h <= h:
+            # 标题栏 + 状态条 + 页脚等非卡片区域保持原样，只重算卡片区高度
+            other_h = max(0, h - canvas_h)
+            target_h = other_h + content_h + 2
+            target_h = max(420, min(target_h, screen_h - 48))
+            if abs(target_h - h) <= 4:
                 return
             left = max(0, (screen_w - w) // 2)
-            top = max(0, (screen_h - new_h) // 2)
-            self.root.geometry('%dx%d+%d+%d' % (w, new_h, left, top))
+            top = max(0, (screen_h - target_h) // 2)
+            self.root.geometry('%dx%d+%d+%d' % (w, target_h, left, top))
         except tk.TclError:
             pass
 
@@ -446,22 +449,26 @@ class App:
         body = tk.Frame(self.root, bg=p['bg'])
         body.pack(fill=tk.BOTH, expand=True)
 
-        # 合并提醒条：离线只显示温馨提示；检测到外网时整条变红并入断网提示
-        self._warn_ybg = ui_theme.mix(p['warning'], '#ffffff', 0.86)
-        self._warn_rbg = ui_theme.mix(p['danger'], '#ffffff', 0.92)
-        self._warn_bar = tk.Frame(body, bg=self._warn_ybg, padx=14, pady=4)
-        self._warn_title = tk.Label(self._warn_bar, text='温馨提示：',
+        # 现场状态条：只保留关键检查项，避免长段提示把首页变成公告栏
+        self._warn_ybg = ui_theme.mix(p['warning'], '#ffffff', 0.90)
+        self._warn_rbg = ui_theme.mix(p['danger'], '#ffffff', 0.94)
+        self._warn_bar = tk.Frame(body, bg=self._warn_ybg, padx=12, pady=5)
+        self._warn_title = tk.Label(self._warn_bar, text='现场状态：',
                                     font=ui_theme.font(9, 'bold'),
                                     fg=p['warning'], bg=self._warn_ybg)
-        self._warn_title.pack(anchor='w')
+        self._warn_title.pack(side=tk.LEFT)
         self._warn_body = tk.Label(
             self._warn_bar,
-            text=('会场音响、话筒以及翻页笔等设备是否已准备好'
-                  '（话筒、翻页笔等是否有电且准备妥当，请仔细检查）；'
-                  '预祝会务圆满成功！'),
+            text='会前检查 6/8 · 音响/话筒/翻页笔已确认 · 建议会务期间断网',
             font=ui_theme.font(9), fg=p['text'], bg=self._warn_ybg,
-            justify=tk.LEFT, anchor='w')
-        self._warn_body.pack(anchor='w')
+            anchor='w')
+        self._warn_body.pack(side=tk.LEFT)
+        self._warn_detail = tk.Label(
+            self._warn_bar, text='查看详情 ›', font=ui_theme.font(9),
+            fg=p['primary'], bg=self._warn_ybg, cursor='hand2')
+        self._warn_detail.pack(side=tk.RIGHT)
+        self._warn_detail.bind(
+            '<Button-1>', lambda _e: self._open_guard_panel())
         self._warn_bar.pack(fill=tk.X, padx=28, pady=(6, 2))
         self._start_net_check()
 
@@ -503,97 +510,96 @@ class App:
         # 窗口真正显示出来之后再补几次（首个 Configure 可能来得太早）
         for delay in (30, 120, 400, 900):
             self.root.after(delay, _sync_card_width)
+            self.root.after(delay + 20, self._fit_card_window)
         inner.bind('<MouseWheel>', lambda e: card_canvas.yview_scroll(
             -int(e.delta / 120), 'units'))
         card_canvas.bind('<MouseWheel>', lambda e: card_canvas.yview_scroll(
             -int(e.delta / 120), 'units'))
 
         # 功能分三组展示：
-        # ① 会务现场：现场环节用的投屏/播放/抽签，关闭窗口都会二次确认，
-        #    放最前面，开场时一眼就能找到、也不怕误触关掉；
-        # ② 文件收发：跨设备传文件；③ 制作工具：会前准备与素材处理。
+        # 首页信息架构：现场高频放大，其余按工作流收进次级分组
+        featured = (
+            ('PPT倒计时', '扩展屏投屏\n与 PPT 联动',
+             self._open_countdown, '时'),
+            ('会务音乐', '暖场播放\n循环不中断',
+             self._open_music, '乐'),
+            ('会务视频', '多视频依次\n全屏播放',
+             self._open_video, '影'),
+            ('现场抽签', '名单洗牌\n大屏投屏',
+             self._open_lottery, '签'),
+        )
         groups = (
-            ('会务现场', '现场环节使用 · 关闭窗口前会先确认，防止误触', (
-                ('PPT倒计时',
-                 '扩展屏投屏 · 与PPT联动',
-                 self._open_countdown, '时', ui_theme.ACCENTS['countdown']),
-                ('会务音乐',
-                 '本地音频暖场 / 循环',
-                 self._open_music, '乐', ui_theme.ACCENTS['music']),
-                ('会务视频',
-                 '多视频依次全屏播放',
-                 self._open_video, '影', ui_theme.ACCENTS['video']),
-                ('现场抽签排序',
-                 '名单洗牌 · 大屏投屏',
-                 self._open_lottery, '签', ui_theme.ACCENTS['lottery']),
-                ('长条屏合成投屏',
-                 '两侧图 + 中间放PPT',
+            ('会前准备', '会前制作 · 素材处理', (
+                ('长条屏合成投屏', '两侧图 + 中间 PPT',
                  self._open_strip, '屏', ui_theme.ACCENTS['strip']),
-                ('提词器',
-                 '大屏词幕 · 自动滚动调速',
+                ('提词器', '大屏词幕 · 自动调速',
                  self._open_prompter, '词', ui_theme.ACCENTS['prompter']),
-            )),
-            ('文件收发', '跨设备收发文件', (
-                ('微信传文件',
-                 '打开微信网页版 · 扫码互传',
-                 self._open_wechat_helper, '微', ui_theme.ACCENTS['wechat']),
-                ('局域网互传',
-                 '两台电脑局域网互传文件',
-                 self._open_lan_share, '传', ui_theme.ACCENTS['lan']),
-                ('扫码收文件',
-                 '手机扫码即可上传文件',
-                 self._open_file_inbox, '收', ui_theme.ACCENTS['inbox']),
-            )),
-            ('制作工具', '会前准备 · 素材处理', (
-                ('会务PPT转换',
-                 'PPT 转图片 / 转16:9全屏',
+                ('会务PPT转换', 'PPT 转图片 / 适配大屏',
                  self._open_ppt, '演', ui_theme.ACCENTS['ppt']),
-                ('生成欢迎语',
-                 '模板改字或自定义背景',
+                ('生成欢迎语', '一键生成欢迎页',
                  self._open_welcome_choice, '语',
                  ui_theme.ACCENTS['welcome']),
-                ('打印',
-                 '座位牌与文件打印',
+                ('打印', '座位牌与资料打印',
                  self._open_print, '印', ui_theme.ACCENTS['print']),
-                ('二维码生成',
-                 '链接/文本转二维码',
+                ('二维码生成', '链接/文本转二维码',
                  self._open_qrcode, '码', ui_theme.ACCENTS['qrcode']),
-                ('快捷邮箱',
-                 '一键直达常用邮箱登录页',
-                 self._open_mail_menu, '邮', ui_theme.ACCENTS['mail']),
-                ('软件下载',
-                 '官方源 · 一键下载',
-                 self._open_downloader, '载',
-                 ui_theme.ACCENTS['downloader']),
-                ('截图（仿 ShareX）',
-                 '区域/全屏/窗口/滚动',
-                 self._open_screenshot, '截',
-                 ui_theme.ACCENTS['screenshot']),
-                ('图片工具箱',
-                 '裁剪缩放旋转·加水印压缩',
+                ('图片工具箱', '裁剪压缩 · 加水印',
                  self._open_image_tools, '图', ui_theme.ACCENTS['photo']),
-                ('音视频剪辑',
-                 '剪切拼接·提音频压缩',
+                ('音视频剪辑', '剪切拼接 · 提音频',
                  self._open_av_tools, '剪', ui_theme.ACCENTS['video']),
             )),
+            ('文件收发', '跨设备收发文件', (
+                ('微信传文件', '扫码网页版互传',
+                 self._open_wechat_helper, '微', ui_theme.ACCENTS['wechat']),
+                ('局域网互传', '电脑之间快速传资料',
+                 self._open_lan_share, '传', ui_theme.ACCENTS['lan']),
+                ('扫码收文件', '手机扫码上传资料',
+                 self._open_file_inbox, '收', ui_theme.ACCENTS['inbox']),
+            )),
+            ('系统工具', '软件与效率工具', (
+                ('软件库', '精选软件 · winget 全库',
+                 self._open_downloader, '库', ui_theme.ACCENTS['downloader']),
+                ('快捷邮箱', '常用邮箱快速登录',
+                 self._open_mail_menu, '邮', ui_theme.ACCENTS['mail']),
+                ('截图', '现场截图与标注',
+                 self._open_screenshot, '截',
+                 ui_theme.ACCENTS['screenshot']),
+            )),
         )
-        # 横条式小卡片：左边图标 + 右边标题说明，三列排布，组间有标题
         columns = 3
-        grid_row = 0
-        for gi, (group_title, group_hint, group_items) in enumerate(groups):
-            hdr = tk.Frame(inner, bg=p['bg'])
-            hdr.grid(row=grid_row, column=0, columnspan=columns,
-                     sticky='ew', padx=7,
-                     pady=((2 if gi == 0 else 14), 3))
+
+        def _add_section_header(parent, row, title, hint, span, first=False):
+            hdr = tk.Frame(parent, bg=p['bg'])
+            hdr.grid(row=row, column=0, columnspan=span, sticky='ew', padx=7,
+                     pady=((2 if first else 14), 3))
             tk.Frame(hdr, bg=p['primary'], width=4,
                      height=15).pack(side=tk.LEFT, padx=(2, 8))
-            tk.Label(hdr, text=group_title,
-                     font=ui_theme.font(10, 'bold'),
+            tk.Label(hdr, text=title, font=ui_theme.font(10, 'bold'),
                      fg=p['text'], bg=p['bg']).pack(side=tk.LEFT)
-            tk.Label(hdr, text=group_hint,
-                     font=ui_theme.font(8),
+            tk.Label(hdr, text=hint, font=ui_theme.font(8),
                      fg=p['faint'], bg=p['bg']).pack(side=tk.LEFT,
                                                       padx=(10, 0))
+
+        # 现场高频：四个大卡片单独成区，和次级工具拉开层级
+        hero = tk.Frame(inner, bg=p['bg'])
+        hero.grid(row=0, column=0, columnspan=columns, sticky='ew')
+        for col in range(4):
+            hero.grid_columnconfigure(col, weight=1, uniform='hero')
+        _add_section_header(hero, 0, '现场高频', '开场后最常用 · 一键直达',
+                            4, first=True)
+        for index, (title, desc, cmd, icon) in enumerate(featured):
+            card = ui_theme.ModernCard(hero, title, desc, command=cmd,
+                                       icon=icon, accent=p['primary'],
+                                       layout='hero')
+            card.grid(row=1, column=index, sticky='nsew', padx=7,
+                      pady=(3, 10))
+            card.bind('<MouseWheel>', lambda e: card_canvas.yview_scroll(
+                -int(e.delta / 120), 'units'))
+
+        grid_row = 1
+        for group_title, group_hint, group_items in groups:
+            _add_section_header(inner, grid_row, group_title, group_hint,
+                                columns)
             grid_row += 1
             for index, (title, desc, cmd, icon, accent) in enumerate(
                     group_items):
@@ -614,7 +620,7 @@ class App:
             inner.grid_columnconfigure(col, weight=1, uniform='card')
 
         # 卡片下方留出底部边距，最后一行不至于贴着窗口底边
-        tk.Frame(inner, bg=p['bg'], height=14).grid(
+        tk.Frame(inner, bg=p['bg'], height=8).grid(
             row=grid_row, column=0, columnspan=columns, sticky='ew')
 
         # 内容多到放不下时才显示右侧滚动条
@@ -633,7 +639,7 @@ class App:
 
         # 底部说明
         tk.Label(body,
-                 text='各功能都在主界面内打开子窗口，关闭主界面会一并关闭',
+                 text='轻匣会务工作台 · 现场模式已就绪',
                  font=ui_theme.font(8), fg=p['faint'],
                  bg=p['bg']).pack(side=tk.BOTTOM, pady=(0, 6))
 
@@ -669,17 +675,16 @@ class App:
                 pass
 
     def _net_online(self):
-        """在线：整条提醒条变红，并入断网提示。"""
+        """在线：状态条变红，给出紧凑的会务断网建议。"""
         try:
             p = ui_theme.PALETTE
             rb = self._warn_rbg
             self._warn_bar.config(bg=rb)
-            self._warn_title.config(text='提醒：', fg=p['danger'], bg=rb)
+            self._warn_title.config(text='现场状态：', fg=p['danger'], bg=rb)
             self._warn_body.config(
-                text=('会务期间请断网，关闭一切屏保程序，防止广告弹窗。'
-                      '会场音响、话筒以及翻页笔等设备请确认有电并准备妥当；'
-                      '预祝会务圆满成功！'),
+                text='网络已连接 · 建议断网并关闭屏保 · 设备电量已确认',
                 fg=p['danger'], bg=rb)
+            self._warn_detail.config(bg=rb)
         except Exception:
             pass
 
@@ -6585,7 +6590,7 @@ class App:
             self._qrcode_win = None
 
     def _open_downloader(self):
-        """打开“软件下载”子窗口：winget 源分类推荐 + 搜索下载。"""
+        """打开“软件库”子窗口：内置精选库 + winget 全库搜索/安装。"""
         if self._activate_or_close_others('downloader'):
             return
         win = self._downloader_win
@@ -6602,10 +6607,10 @@ class App:
             self._downloader_win = None
 
         win = tk.Toplevel(self.root)
-        win.title('软件下载')
-        _center_window(win, 800, 600)
+        win.title('软件库')
+        _center_window(win, 900, 640)
         win.resizable(True, True)
-        win.minsize(700, 520)
+        win.minsize(760, 560)
         ui_theme.style_window(win)
         win.transient(self.root)
         win.protocol('WM_DELETE_WINDOW', self._close_downloader_win)
@@ -6622,7 +6627,7 @@ class App:
             pane = winget_downloader.DownloaderPane(win)
         except Exception as e:
             messagebox.showerror(
-                '软件下载', '软件下载打开失败：\n%s' % e, parent=win)
+                '软件库', '软件库打开失败：\n%s' % e, parent=win)
             self._close_downloader_win()
             return
         pane.pack(fill=tk.BOTH, expand=True)
@@ -6704,8 +6709,8 @@ class App:
         self._music_win = win
 
         state = {'list': [], 'names': [], 'idx': -1, 'playing': False,
-                 'manual': False, 'loop': True, 'seek': False,
-                 'play_t0': 0.0}   # 最近一次点播的时间，用于判断“没播起来”
+                 'manual': False, 'loop': True, 'one_loop': False,
+                 'seek': False, 'play_t0': 0.0}   # 最近一次点播的时间，用于判断“没播起来”
         win._music_state = state
 
         # —— 播放引擎：Windows Media Player OCX（系统自带，mp3/wav 均可） ——
@@ -6723,12 +6728,138 @@ class App:
         wmp.settings.volume = 100
         win._music_wmp = wmp
 
+        # —— 数据目录：默认 D:\会务音乐数据，没有 D 盘就放程序同目录 ——
+        # 位置记在程序旁的 会务音乐配置.json，用户可在界面上改。
+        import json
+        _DATA_FOLDER = '会务音乐数据'
+        _CFG_NAME = '会务音乐配置.json'
+
+        def _program_dir():
+            if getattr(sys, 'frozen', False):
+                return os.path.dirname(os.path.abspath(sys.executable))
+            return os.path.dirname(os.path.abspath(__file__))
+
+        def _default_data_root():
+            if os.path.isdir('D:\\'):
+                return os.path.join('D:\\', _DATA_FOLDER)
+            return os.path.join(_program_dir(), _DATA_FOLDER)
+
+        def _config_path():
+            return os.path.join(_program_dir(), _CFG_NAME)
+
+        def _read_data_root():
+            try:
+                with open(_config_path(), 'r', encoding='utf-8') as f:
+                    root = (json.load(f) or {}).get('data_dir')
+                if root and os.path.isabs(root):
+                    drive = os.path.splitdrive(root)[0]
+                    if not drive or os.path.isdir(drive + os.sep):
+                        return root
+            except Exception:
+                pass
+            return _default_data_root()
+
+        def _write_data_root(root):
+            try:
+                with open(_config_path(), 'w', encoding='utf-8') as f:
+                    json.dump({'data_dir': root}, f,
+                              ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+        app_data = {'root': _read_data_root()}
+        win._music_data = app_data
+
+        # 旧版 data/ 里的列表迁一次，避免升级后自定义歌曲丢失
+        try:
+            _old = os.path.join(_program_dir(), 'data', '音乐播放列表.json')
+            _new = os.path.join(app_data['root'], '音乐播放列表.json')
+            if (not os.path.exists(_new) and os.path.isfile(_old)
+                    and os.path.getsize(_old) > 0):
+                import shutil
+                os.makedirs(app_data['root'], exist_ok=True)
+                shutil.copy2(_old, _new)
+        except Exception:
+            pass
+
+        def _music_dir():
+            return os.path.join(app_data['root'], 'music')
+
+        def _music_list_path():
+            p = os.path.join(app_data['root'], '音乐播放列表.json')
+            try:
+                os.makedirs(app_data['root'], exist_ok=True)
+                with open(p, 'a', encoding='utf-8'):
+                    pass
+            except OSError:
+                p = os.path.join(_program_dir(), '会务音乐播放列表.json')
+            return p
+
+        def _load_saved_list():
+            """返回 [(路径, 显示名), ...]；None 表示还没有保存过。"""
+            path = _music_list_path()
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                return None
+            try:
+                import json
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception:
+                return None
+            items = data.get('songs', []) if isinstance(data, dict) else []
+            out = []
+            for item in items:
+                if isinstance(item, dict):
+                    p, name = item.get('path'), item.get('name')
+                elif isinstance(item, (list, tuple)) and len(item) == 2:
+                    p, name = item
+                else:
+                    continue
+                if not isinstance(p, str) or not p or not os.path.isfile(p):
+                    continue      # 源文件已被移走/删除：不恢复失效条目
+                out.append((p, name or os.path.basename(p)))
+            return out
+
+        def _save_local_list():
+            import json
+            try:
+                with open(_music_list_path(), 'w', encoding='utf-8') as f:
+                    json.dump({'songs': [
+                        {'path': p, 'name': state['names'][i]}
+                        for i, p in enumerate(state['list'])
+                    ]}, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+        win._music_save_list = _save_local_list
+
         def _play_state():
             """playState：3=播放中 2=已暂停 8=播放完 1=已停止。"""
             try:
                 return int(wmp.playState)
             except Exception:
                 return 0
+
+        # WMP 在曲目播完时，不同版本/编码下 playState 可能是 8(MediaEnded)，
+        # 也可能直接落到 1(Stopped) 甚至 0(Undefined)。400ms 轮询只守 8 会漏判，
+        # 表现为"播完一首就停、列表循环失效"。这里记住当前曲目是否真正进入过
+        # 播放态(3)，用它兜底识别自然结束。
+        play_ctx = {'ever': False, 'started_at': 0.0}
+
+        def _media_ended():
+            ps = _play_state()
+            if ps == 3:            # 真正在播：绝不误判成播完
+                return False
+            # 同一 URL 重播时 WMP 会短暂残留上一轮的结束态；
+            # 1 秒内且还没真正起播就先忽略，否则单曲循环会空转。
+            if (not play_ctx['ever']
+                    and time.monotonic() - play_ctx['started_at'] < 1.0):
+                return False
+            if ps == 8:            # MediaEnded：明确播完
+                return True
+            # Undefined/Stopped：只有"曾经真正响过"才算自然播完，
+            # 避免刚设置 URL 还没起播(Ready/Stopped)时被误判成结束。
+            return ps in (0, 1) and play_ctx['ever']
 
         def _win_alive():
             """窗口是否还在：子窗口关闭后定时器要立刻停下来。"""
@@ -6748,8 +6879,8 @@ class App:
             except Exception:
                 pass
 
-        # —— 停止时 2 秒淡出，不“啪”地切断声音 ——
-        fade = {'job': None}  # 进行中的淡出定时器
+        # —— 停止/暂停时 2 秒淡出，不“啪”地切断声音 ——
+        fade = {'job': None, 'action': None, 'tab': None}
 
         def _cancel_fade(restore=True):
             """取消淡出；restore=True 时把音量恢复到 100。"""
@@ -6758,16 +6889,20 @@ class App:
                     win.after_cancel(fade['job'])
                 except Exception:
                     pass
-                fade['job'] = None
+            fade['job'] = None
+            fade['action'] = None
+            fade['tab'] = None
             if restore:
                 try:
                     wmp.settings.volume = 100
                 except Exception:
                     pass
 
-        def _fade_out(done=None):
-            """音量在 2 秒内线性降到 0 再真正停止；done 为停止后的回调。"""
+        def _fade_out(done=None, action='stop', tab=None):
+            """音量 2 秒线性降到 0；action=stop/pause 决定收尾动作。"""
             _cancel_fade()
+            fade['action'] = action
+            fade['tab'] = tab
             try:
                 start = int(wmp.settings.volume) or 100
             except Exception:
@@ -6785,8 +6920,14 @@ class App:
                     fade['job'] = win.after(100, _tick)
                 else:
                     fade['job'] = None
+                    kind = fade['action']
+                    fade['action'] = None
+                    fade['tab'] = None
                     try:
-                        wmp.controls.stop()
+                        if kind == 'pause':
+                            wmp.controls.pause()
+                        else:
+                            wmp.controls.stop()
                     except Exception:
                         pass
                     try:
@@ -6882,6 +7023,8 @@ class App:
 
         def _play_stalled(st, grace=4.0):
             """播放请求发出后过了 grace 秒还没真正开始 → 判定没播起来。"""
+            if play_ctx['ever']:
+                return False      # 已经真正播过：现在是播完停止，不是失败
             if time.monotonic() - float(st.get('play_t0') or 0) < grace:
                 return False
             return _play_state() in (0, 1, 10)
@@ -6895,8 +7038,13 @@ class App:
             st['idx'] = i
             st['manual'] = False
             _cancel_fade()  # 切歌/重播：取消淡出并恢复音量
-            st['play_t0'] = time.monotonic()
+            now = time.monotonic()
+            st['play_t0'] = now
+            play_ctx['ever'] = False
+            play_ctx['started_at'] = now
             try:
+                # 同一 URL 直接再 play 不会重新开始，先 stop 再载入
+                wmp.controls.stop()
                 wmp.URL = st['list'][i]  # 设置播放源
                 wmp.controls.play()
             except Exception:
@@ -6913,8 +7061,21 @@ class App:
             """播放/暂停：只作用于当前页签的播放器，本地/在线互不串扰。"""
             st = state
             if fade['job'] is not None:
-                # 淡出途中按“播放/暂停”→ 取消淡出，恢复当前页签的播放
+                # 淡出途中再按“播放/暂停”：暂停淡出直接续播，停止淡出才重播
+                was_pause = fade.get('action') == 'pause'
+                target = fade.get('tab')
                 _cancel_fade()
+                if was_pause:
+                    try:
+                        wmp.controls.play()
+                    except Exception:
+                        pass
+                    if target == 1:
+                        online['manual'] = False
+                    else:
+                        st['manual'] = False
+                    _refresh()
+                    return
                 if _current_tab() == 1:
                     sel = online['sel']
                     if sel:
@@ -6941,12 +7102,10 @@ class App:
                             pass
                         online['manual'] = False
                     else:
-                        try:
-                            wmp.controls.pause()
-                        except Exception:
-                            pass
+                        # 正在响 → 先渐隐 2 秒再暂停，和关窗效果一致
                         online['manual'] = True
-                    _refresh()
+                        _refresh()
+                        _fade_out(_refresh, action='pause', tab=1)
                     return
                 sel = online['sel']
                 if sel:
@@ -6954,6 +7113,7 @@ class App:
                     pos = online['pos']
                     if not (0 <= pos < len(sel)):
                         pos = 0
+                    online['preview'] = False
                     _online_play(pos)
                 else:
                     messagebox.showinfo(
@@ -6969,9 +7129,12 @@ class App:
                                         '请先点“选歌”添加音频。')
                 return
             ps = _play_state()
-            if ps == 3:  # 播放中 → 暂停
-                wmp.controls.pause()
+            if ps == 3:  # 播放中 → 渐隐 2 秒后暂停
                 st['manual'] = True
+                _refresh()
+                _fade_out(_refresh, action='pause', tab=0)
+                _sync_selection()
+                return
             elif ps == 2:  # 已暂停 → 继续
                 wmp.controls.play()
                 st['manual'] = False
@@ -7043,6 +7206,8 @@ class App:
                 return
             _sync_progress()
             _refresh()  # 曲名 + 状态文字 + 播放/暂停图标整体校准
+            if _play_state() == 3:   # 真正在播：记住这首已经响起来
+                play_ctx['ever'] = True
             if online['playing']:
                 if online['loading']:
                     ps = _play_state()
@@ -7071,13 +7236,18 @@ class App:
                                   '这首没能播放（可能受版权限制），换一首。'),
                             fg='#c62828')
                         _refresh()
-                if online['playing'] and _play_state() == 8:
+                if (online['playing'] and not online['manual']
+                        and not online['loading'] and _media_ended()):
                     # 在线曲目播完 → 切下一首（循环回到第一首；否则结束）
                     n = len(online['sel'])
                     if n > 0:
-                        nxt = online['pos'] + 1
-                        if nxt >= n and online['loop']:
-                            nxt = 0
+                        if online['one_loop'] and not online['preview']:
+                            nxt = online['pos']   # 单曲循环：重播当前这首
+                        else:
+                            nxt = online['pos'] + 1
+                            # 试听单曲播完即停，不进入循环
+                            if nxt >= n and online['loop'] and not online['preview']:
+                                nxt = 0
                         if nxt < n:
                             _online_play(nxt)
                         else:
@@ -7088,12 +7258,15 @@ class App:
                                           fg='#2e8b57')
                             _refresh()
             if st['playing'] and not st['manual']:
-                if _play_state() == 8:  # 一首播完
+                if _media_ended():  # 一首播完（兼容 WMP 落到 Stopped 的情况）
                     n = len(st['list'])
                     if n > 0:
-                        nxt = st['idx'] + 1
-                        if nxt >= n and st['loop']:
-                            nxt = 0
+                        if st['one_loop']:
+                            nxt = st['idx']   # 单曲循环：重播当前这首
+                        else:
+                            nxt = st['idx'] + 1
+                            if nxt >= n and st['loop']:
+                                nxt = 0
                         if nxt < n:
                             _play_idx(nxt)
                         else:
@@ -7116,6 +7289,7 @@ class App:
                     state['list'].append(p)
                     state['names'].append(os.path.basename(p))
             _render()
+            _save_local_list()
             if state['idx'] < 0:
                 _play_idx(0)
 
@@ -7135,23 +7309,84 @@ class App:
                 return
             state['names'][i] = new
             _render()
+            _save_local_list()
 
         def _load_defaults():
-            """把 files 目录下的默认会务音乐写入播放列表。"""
-            for base in (_BASE_DIR, os.path.dirname(
-                    os.path.abspath(__file__))):
-                d = os.path.join(base, 'files')
-                if not os.path.isdir(d):
-                    continue
-                for name in ['颁奖音乐.mp3', '领导上场音乐.mp3',
-                             '暖场音乐(45分钟).mp3', '主持人上场音乐.mp3']:
-                    p = os.path.join(d, name)
-                    if os.path.exists(p) and p not in state['list']:
-                        state['list'].append(p)
-                        state['names'].append(name)
+            """把四首会务音乐写入播放列表（按名字去重）。"""
+            names = ['颁奖音乐.mp3', '领导上场音乐.mp3',
+                     '暖场音乐(45分钟).mp3', '主持人上场音乐.mp3']
+            # 打包后从内置资源释放到数据目录；只从数据目录加载，避免重复
+            if getattr(sys, 'frozen', False):
+                src = os.path.join(_BASE_DIR, 'data', 'music')
+                dst = _music_dir()
+                if os.path.isdir(src):
+                    try:
+                        import shutil
+                        os.makedirs(dst, exist_ok=True)
+                        for name in names:
+                            s = os.path.join(src, name)
+                            d = os.path.join(dst, name)
+                            if os.path.isfile(s) and not os.path.exists(d):
+                                shutil.copy2(s, d)
+                    except OSError:
+                        pass
+            for name in names:
+                p = os.path.join(_music_dir(), name)
+                if os.path.isfile(p) and name not in state['names']:
+                    state['list'].append(p)
+                    state['names'].append(name)
             _render()
 
+        def _change_data_dir():
+            """更改数据目录：迁移已有数据、写配置，并立即重载列表。"""
+            initial = app_data['root'] if os.path.isdir(app_data['root']) \
+                else _program_dir()
+            chosen = filedialog.askdirectory(
+                parent=win, title='选择数据位置（会自动建“会务音乐数据”文件夹）',
+                initialdir=initial)
+            if not chosen:
+                return
+            chosen = os.path.normpath(chosen)
+            if os.path.basename(chosen) != _DATA_FOLDER:
+                chosen = os.path.join(chosen, _DATA_FOLDER)
+            chosen = os.path.normpath(chosen)
+            old = app_data['root']
+            if os.path.normcase(chosen) == os.path.normcase(old):
+                messagebox.showinfo('会务音乐', '数据已经在这个位置了。')
+                return
+            try:
+                import shutil
+                os.makedirs(os.path.join(chosen, 'music'), exist_ok=True)
+                for name in ('颁奖音乐.mp3', '领导上场音乐.mp3',
+                             '暖场音乐(45分钟).mp3', '主持人上场音乐.mp3'):
+                    s = os.path.join(_music_dir(), name)
+                    d = os.path.join(chosen, 'music', name)
+                    if os.path.isfile(s) and not os.path.exists(d):
+                        shutil.copy2(s, d)
+                s = os.path.join(old, '音乐播放列表.json')
+                d = os.path.join(chosen, '音乐播放列表.json')
+                if os.path.isfile(s) and not os.path.exists(d):
+                    shutil.copy2(s, d)
+            except OSError as e:
+                messagebox.showerror('会务音乐', '迁移数据失败：\n%s' % e)
+                return
+            _write_data_root(chosen)
+            app_data['root'] = chosen
+            _stop()
+            state['list'] = []
+            state['names'] = []
+            state['idx'] = -1
+            saved = _load_saved_list()
+            if not saved:
+                _load_defaults()
+            else:
+                state['list'] = [p for p, _ in saved]
+                state['names'] = [n for _, n in saved]
+            _render()
+            messagebox.showinfo('会务音乐', '数据位置已改为：\n%s' % chosen)
+
         def _finish_close():
+            _save_local_list()
             _cancel_fade(restore=False)
             try:
                 win.destroy()
@@ -7235,6 +7470,10 @@ class App:
                   bg=CARD_BG, relief=tk.FLAT, bd=1,
                   highlightbackground=BORDER_COLOR, cursor='arrow',
                   command=_close_music).pack(side=tk.RIGHT)
+        tk.Button(top, text='数据位置', font=('微软雅黑', 9),
+                  bg=CARD_BG, relief=tk.FLAT, bd=1,
+                  highlightbackground=BORDER_COLOR, cursor='arrow',
+                  command=_change_data_dir).pack(side=tk.RIGHT, padx=(0, 8))
 
         # —— 统一播放栏：本地播放 / 在线音乐共用同一套显示与控制 ——
         # 当前曲目 + 状态
@@ -7423,6 +7662,7 @@ class App:
             if st['idx'] >= len(st['list']):
                 st['idx'] = len(st['list']) - 1
             _render()
+            _save_local_list()
 
         def _render():
             """按 state 重建播放列表，每行右侧带播放/移除图标。"""
@@ -7457,9 +7697,25 @@ class App:
         frm_tool = tk.Frame(page1, bg=WINDOW_BG)
         frm_tool.pack(fill=tk.X, padx=20, pady=(0, 12))
         loop_var = tk.BooleanVar(value=state['loop'])
+        one_var = tk.BooleanVar(value=state['one_loop'])
+
+        def _on_local_list_loop():
+            enabled = loop_var.get()
+            state['loop'] = enabled
+            state['one_loop'] = False
+            one_var.set(False)
+
+        def _on_local_one_loop():
+            enabled = one_var.get()
+            state['one_loop'] = enabled
+            state['loop'] = False
+            loop_var.set(False)
+
         ttk.Checkbutton(frm_tool, text='列表循环播放', variable=loop_var,
-                        command=lambda: state.update(
-                            loop=loop_var.get())).pack(side=tk.LEFT)
+                        command=_on_local_list_loop).pack(side=tk.LEFT)
+        ttk.Checkbutton(frm_tool, text='单曲循环', variable=one_var,
+                        command=_on_local_one_loop).pack(
+                            side=tk.LEFT, padx=(8, 0))
         tk.Button(frm_tool, text='选歌', font=('微软雅黑', 9),
                   bg=CARD_BG, relief=tk.FLAT, bd=1,
                   highlightbackground=BORDER_COLOR, cursor='arrow',
@@ -7471,13 +7727,20 @@ class App:
         tk.Label(frm_tool, text='双击列表项即可播放', font=('微软雅黑', 8),
                  fg='#9aa3b2', bg=WINDOW_BG).pack(side=tk.RIGHT)
 
-        _load_defaults()  # 默认会务音乐
+        saved = _load_saved_list()
+        if not saved:
+            _load_defaults()      # 首次运行/列表为空：载入四首默认音乐
+        else:
+            # 恢复上次保存的列表；源文件已不存在的条目读取时已滤掉
+            state['list'] = [p for p, _ in saved]
+            state['names'] = [n for _, n in saved]
+            _render()
 
         # —— 页2：在线音乐 ——
         # (标题, 歌曲id, fee)；直链是临时地址，播放/下载时用 id 现解析
         res_list = []
         online = {'sel': [], 'pos': -1, 'playing': False, 'manual': False,
-                  'loop': False, 'page': 0,
+                  'loop': True, 'one_loop': False, 'page': 0, 'preview': False,
                   'loading': False, 'load_title': '', 'load_t0': 0.0,
                   'load_dots': 0, 'load_job': None}  # 在线播放状态
 
@@ -7697,6 +7960,8 @@ class App:
             online['pos'] = pos
             online['playing'] = True
             online['manual'] = False
+            play_ctx['ever'] = False
+            play_ctx['started_at'] = time.monotonic()
             title, sid, fee = res_list[i]
             _cancel_fade()  # 在线播放顶掉淡出中的曲目：恢复音量
             if state['playing']:
@@ -7726,6 +7991,8 @@ class App:
                          + title, fg='#c62828')
                 return
             try:
+                # 单曲循环会重复载入同一地址，先 stop 才能重新起播
+                wmp.controls.stop()
                 wmp.URL = url
                 wmp.controls.play()
             except Exception:
@@ -7742,6 +8009,7 @@ class App:
                                     '请先在结果中选中要播放的曲目。')
                 return
             online['sel'] = idxs
+            online['preview'] = False
             _online_play(0)
 
         def _preview_result(e=None):
@@ -7751,6 +8019,7 @@ class App:
                 return
             i = idxs[0]
             online['sel'] = [i]
+            online['preview'] = True
             _online_play(0)
 
         def _remove_result():
@@ -7845,6 +8114,7 @@ class App:
             state['list'].append(path)
             state['names'].append(disp)
             _render()
+            _save_local_list()
             short = disp if len(disp) <= 26 else disp[:24] + '…'
             lbl_dl.config(text='已下载：%s（已加入本地播放列表）' % short,
                           fg='#2e8b57')
@@ -7921,9 +8191,29 @@ class App:
         frm_dl = tk.Frame(page2, bg=WINDOW_BG)
         frm_dl.pack(fill=tk.X, padx=12, pady=(0, 4))
         onl_loop_var = tk.BooleanVar(value=online['loop'])
+        onl_one_var = tk.BooleanVar(value=online['one_loop'])
+
+        def _on_online_list_loop():
+            enabled = onl_loop_var.get()
+            online['loop'] = enabled
+            online['one_loop'] = False
+            onl_one_var.set(False)
+            if enabled:
+                online['preview'] = False
+
+        def _on_online_one_loop():
+            enabled = onl_one_var.get()
+            online['one_loop'] = enabled
+            online['loop'] = False
+            onl_loop_var.set(False)
+            if enabled:
+                online['preview'] = False
+
         ttk.Checkbutton(frm_dl, text='循环播放选中', variable=onl_loop_var,
-                        command=lambda: online.update(
-                            loop=onl_loop_var.get())).pack(side=tk.LEFT)
+                        command=_on_online_list_loop).pack(side=tk.LEFT)
+        ttk.Checkbutton(frm_dl, text='单曲循环', variable=onl_one_var,
+                        command=_on_online_one_loop).pack(
+                            side=tk.LEFT, padx=(8, 0))
         tk.Button(frm_dl, text='播放选中', font=('微软雅黑', 9),
                   bg=PRIMARY, fg='#ffffff', relief=tk.FLAT, bd=0,
                   cursor='arrow',
@@ -10613,6 +10903,12 @@ class App:
         """关闭会务音乐子窗口（停止播放）。"""
         win = self._music_win
         if win is not None:
+            save = getattr(win, '_music_save_list', None)
+            if save is not None:
+                try:
+                    save()
+                except Exception:
+                    pass
             wmp = getattr(win, '_music_wmp', None)
             if wmp is not None:
                 try:
